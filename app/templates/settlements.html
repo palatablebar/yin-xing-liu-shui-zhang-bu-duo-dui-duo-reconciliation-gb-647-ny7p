@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block title %}净额结算{% endblock %}
+{% block body %}
+{% set t = totals %}
+<section class="totalbar">
+  <span class="total"><b>到账</b><em>{{ t.get('receipts_total', '0')|money }}</em>元</span>
+  <span class="total"><b>已抵现金</b><em>{{ t.get('cash_applied', '0')|money }}</em>元</span>
+  <span class="total"><b>待核销</b><em>{{ t.get('cash_unapplied', '0')|money }}</em>元</span>
+  <span class="total"><b>应收剩余</b><em>{{ t.get('recv_remaining', '0')|money }}</em>元</span>
+  <span class="total"><b>排除</b><em>{{ counts.get('excluded', 0) }}</em>笔</span>
+  <span class="total total-right"><b>抵减</b><em>{{ t.get('recv_settled', '0')|money }}</em>元</span>
+</section>
+<main class="page">
+  <header class="page-head">
+    <h1>净额结算</h1>
+    {% if batch %}
+    <span class="page-meta mono">{{ batch.batch_id }} · v{{ batch.version }}</span>
+    <span class="page-meta mono">{{ batch.created_at|localdt }}</span>
+    {% else %}
+    <span class="page-meta">还没有结算批次</span>
+    {% endif %}
+    {% if stale %}<span class="chip">输入已变化，请重新执行结算</span>{% endif %}
+  </header>
+  <section class="panel">
+    <h2>操作</h2>
+    <div class="side-actions">
+      <button class="btn" data-action="demo_settle">载入结算样例</button>
+      <button class="btn" data-action="apply_settle">执行结算</button>
+      {% if batch %}<a class="btn" href="/api/settlements/export.csv">下载结算 CSV</a>{% endif %}
+    </div>
+    <form id="settle-import-form" class="import-form" enctype="multipart/form-data">
+      <select name="side" aria-label="侧">
+        <option value="vouchers">往来凭证</option>
+        <option value="receipts">到账清单</option>
+      </select>
+      <input type="file" name="file" accept=".csv" aria-label="结算文件">
+      <button class="btn" type="submit">导入文件</button>
+    </form>
+    <div class="rules">
+      <span class="chip">争议不抵</span>
+      <span class="chip">到期日未到不抵</span>
+      <span class="chip">互欠先抵、现金补差</span>
+      <span class="chip">应收按到期日升序受偿</span>
+      <span class="chip">凭证 {{ inputs.vouchers }} 笔 · 到账 {{ inputs.receipts }} 笔</span>
+    </div>
+  </section>
+  {% if batch %}
+  <section class="panel">
+    <h2>到账与核销</h2>
+    <div class="table-wrap">
+      <table class="grid" id="settle-receipt-table">
+        <thead><tr><th>到账号</th><th>往来单位</th><th>到账日</th><th class="num">到账金额</th><th class="num">已抵现金</th><th class="num">待核销</th><th>状态</th></tr></thead>
+        <tbody>
+        {% for row in receipts %}
+          <tr>
+            <td class="mono">{{ row.receipt_no }}</td>
+            <td>{{ row.counterparty }}</td>
+            <td class="mono">{{ row.received_at }}</td>
+            <td class="num mono">{{ row.amount|money }}</td>
+            <td class="num mono">{{ row.applied|money }}</td>
+            <td class="num mono">{{ row.unapplied|money }}</td>
+            <td class="state">{{ row.status_label }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% if not receipts %}<p class="empty">没有到账。</p>{% endif %}
+    </div>
+  </section>
+  <section class="panel">
+    <h2>抵减明细</h2>
+    <div class="table-wrap">
+      <table class="grid" id="settle-alloc-table">
+        <thead><tr><th>到账号</th><th>行</th><th>往来单位</th><th>方式</th><th>来源</th><th>去向</th><th class="num">抵减金额</th></tr></thead>
+        <tbody>
+        {% for row in allocations %}
+          <tr>
+            <td class="mono">{{ row.receipt_no }}</td>
+            <td class="mono">{{ row.line_seq }}</td>
+            <td>{{ row.counterparty }}</td>
+            <td>{{ row.source_label }}</td>
+            <td class="mono">{{ row.source_no }}</td>
+            <td class="mono">{{ row.target_no }}</td>
+            <td class="num mono">{{ row.amount|money }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% if not allocations %}<p class="empty">没有抵减。</p>{% endif %}
+    </div>
+  </section>
+  <section class="panel">
+    <h2>凭证余额</h2>
+    <div class="table-wrap">
+      <table class="grid" id="settle-voucher-table">
+        <thead><tr><th>凭证号</th><th>往来单位</th><th>类型</th><th>到期日</th><th>争议</th><th class="num">原金额</th><th class="num">本次抵减</th><th class="num">剩余</th><th>状态</th><th>排除原因</th></tr></thead>
+        <tbody>
+        {% for row in vouchers %}
+          <tr{% if row.status == 'excluded' %} class="unmatched"{% endif %}>
+            <td class="mono">{{ row.voucher_no }}</td>
+            <td>{{ row.counterparty }}</td>
+            <td>{{ row.kind_label }}</td>
+            <td class="mono">{{ row.due_date }}</td>
+            <td>{{ '是' if row.disputed else '否' }}</td>
+            <td class="num mono">{{ row.original|money }}</td>
+            <td class="num mono">{{ row.settled|money }}</td>
+            <td class="num mono">{{ row.remaining|money }}</td>
+            <td class="state">{{ row.status_label }}</td>
+            <td class="state">{% if row.exclude_reason %}<span title="{{ row.exclude_reason }}">{{ row.exclude_label }}</span>{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% if not vouchers %}<p class="empty">没有凭证。</p>{% endif %}
+    </div>
+  </section>
+  <section class="panel">
+    <h2>守恒校验</h2>
+    <table class="grid compact" id="settle-identity-table">
+      <thead><tr><th>名称</th><th class="num">左值</th><th class="num">右值</th><th>状态</th></tr></thead>
+      <tbody>
+      {% for item in identities %}
+        <tr>
+          <td>{{ item.label }}</td>
+          <td class="num mono">{% if item.unit == '元' %}{{ item.left|money }}{% else %}{{ item.left }}{% endif %}</td>
+          <td class="num mono">{% if item.unit == '元' %}{{ item.right|money }}{% else %}{{ item.right }}{% endif %}</td>
+          <td class="state">{% if item.balanced %}平衡{% else %}不平{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endif %}
+  <section class="panel">
+    <h2>结算版本</h2>
+    <div class="table-wrap">
+      <table class="grid" id="settle-version-table">
+        <thead><tr><th>批次号</th><th>版本</th><th>生成时间</th><th>状态</th><th></th></tr></thead>
+        <tbody>
+        {% for v in versions %}
+          <tr>
+            <td class="mono">{{ v.batch_id }}</td>
+            <td class="mono">v{{ v.version }}</td>
+            <td class="mono">{{ v.created_at|localdt }}</td>
+            <td class="state">{% if v.current %}当前{% else %}历史{% endif %}</td>
+            <td>{% if not v.current %}<button class="btn" data-action="restore" data-batch="{{ v.batch_id }}">恢复此版本</button>{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% if not versions %}<p class="empty">还没有结算版本。</p>{% endif %}
+    </div>
+  </section>
+</main>
+{% endblock %}

@@ -15,6 +15,7 @@ from .modules.m5_matching.subset import TIER_NAMES
 from .modules.m6_diff import differences as differences_mod
 from .modules.m6_diff import history as history_mod
 from .modules.m7_export import service as export_service
+from .modules.m8_settlement import service as settle_service
 
 TEMPLATE_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
@@ -25,6 +26,7 @@ NAV = (
     ("隔离区", "/quarantine"),
     ("候选", "/candidates"),
     ("匹配", "/matches"),
+    ("结算", "/settlements"),
     ("批次", "/batches"),
     ("导出", "/export"),
 )
@@ -235,3 +237,10 @@ def setup(app: FastAPI) -> None:
         ]
         context.update({"summary": summary, "total_rows": total_rows})
         return render(request, "export.html", context)
+
+    @app.get("/settlements")
+    def settlements(request: Request):
+        store = request.app.state.store
+        context = base(request, "净额结算", "/settlements")
+        context.update(settle_service.payload(store))
+        return render(request, "settlements.html", context)

@@ -24,6 +24,10 @@ REASONS = {
     "LEDGER_UNMATCHED": ("账簿未匹配", "差异"),
     "TOLERANCE_GAP": ("容差差额", "差异"),
     "FEE_TOTAL": ("手续费合计", "差异"),
+    "SETTLE_DISPUTED": ("争议未了", "结算"),
+    "SETTLE_NOT_DUE": ("到期日未到", "结算"),
+    "SETTLE_UNAPPLIED": ("到账待核销", "结算"),
+    "SETTLE_PARTIAL": ("部分结算待追索", "结算"),
 }
 
 # 一行同时命中多条规则时，按此顺序取主原因码，保证结果不随检查顺序变化。
@@ -40,7 +44,7 @@ PRIORITY = (
     "DUP_TXN_CONFLICT",
 )
 
-STAGES = ("采信", "质量", "候选", "求解", "差异", "导出")
+STAGES = ("采信", "质量", "候选", "求解", "差异", "导出", "结算")
 
 
 def label(code: str) -> str:

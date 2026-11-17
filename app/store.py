@@ -85,6 +85,71 @@ CREATE TABLE IF NOT EXISTS matches (
     ledger_signed TEXT NOT NULL DEFAULT '0'
 );
 CREATE INDEX IF NOT EXISTS idx_matches_run ON matches(run_id, tier);
+CREATE TABLE IF NOT EXISTS settle_inputs (
+    side TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    counterparty TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT '',
+    amount TEXT NOT NULL DEFAULT '',
+    due_date TEXT NOT NULL DEFAULT '',
+    disputed INTEGER NOT NULL DEFAULT 0,
+    received_at TEXT NOT NULL DEFAULT '',
+    memo TEXT NOT NULL DEFAULT '',
+    seq INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (side, ref)
+);
+CREATE TABLE IF NOT EXISTS settle_batches (
+    batch_id TEXT PRIMARY KEY,
+    version INTEGER NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    rule_version TEXT NOT NULL DEFAULT '',
+    vouchers_sha TEXT NOT NULL DEFAULT '',
+    receipts_sha TEXT NOT NULL DEFAULT '',
+    totals_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'ready'
+);
+CREATE TABLE IF NOT EXISTS settle_receipt_rows (
+    batch_id TEXT NOT NULL,
+    receipt_no TEXT NOT NULL,
+    counterparty TEXT NOT NULL DEFAULT '',
+    received_at TEXT NOT NULL DEFAULT '',
+    amount TEXT NOT NULL DEFAULT '',
+    applied TEXT NOT NULL DEFAULT '',
+    unapplied TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_settle_receipts ON settle_receipt_rows(batch_id, receipt_no);
+CREATE TABLE IF NOT EXISTS settle_result_rows (
+    batch_id TEXT NOT NULL,
+    voucher_no TEXT NOT NULL,
+    counterparty TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT '',
+    due_date TEXT NOT NULL DEFAULT '',
+    disputed INTEGER NOT NULL DEFAULT 0,
+    original TEXT NOT NULL DEFAULT '',
+    settled TEXT NOT NULL DEFAULT '',
+    remaining TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    exclude_reason TEXT NOT NULL DEFAULT '',
+    memo TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_settle_results ON settle_result_rows(batch_id, voucher_no);
+CREATE TABLE IF NOT EXISTS settle_alloc_rows (
+    batch_id TEXT NOT NULL,
+    receipt_no TEXT NOT NULL,
+    line_seq INTEGER NOT NULL,
+    counterparty TEXT NOT NULL DEFAULT '',
+    source_kind TEXT NOT NULL DEFAULT '',
+    source_no TEXT NOT NULL DEFAULT '',
+    target_no TEXT NOT NULL DEFAULT '',
+    amount TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_settle_allocs ON settle_alloc_rows(batch_id, receipt_no, line_seq);
+CREATE TABLE IF NOT EXISTS settle_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    current_batch_id TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+);
 """
 
 RUN_COLUMNS = (
@@ -309,4 +374,210 @@ class Store:
                     )
                     for m in matches
                 ],
+            )
+
+    # ---------- 净额结算 ----------
+    def replace_settle_inputs(self, side: str, rows: list[dict]) -> None:
+        """同一侧（凭证/到账）整体替换，重导同一文件行数与内容不变。"""
+        with self._conn() as conn:
+            conn.execute("DELETE FROM settle_inputs WHERE side = ?", (side,))
+            conn.executemany(
+                """INSERT INTO settle_inputs (side, ref, counterparty, kind, amount,
+                    due_date, disputed, received_at, memo, seq)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        side, r["ref"], r.get("counterparty", ""), r.get("kind", ""),
+                        str(r.get("amount", "")), r.get("due_date", ""),
+                        int(bool(r.get("disputed", False))), r.get("received_at", ""),
+                        r.get("memo", ""), r.get("seq", index),
+                    )
+                    for index, r in enumerate(rows)
+                ],
+            )
+
+    def settle_inputs(self, side: str | None = None) -> list[dict]:
+        sql = "SELECT * FROM settle_inputs"
+        args: list = []
+        if side:
+            sql += " WHERE side = ?"
+            args.append(side)
+        sql += " ORDER BY side, seq, ref"
+        with self._conn() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["disputed"] = bool(item["disputed"])
+            out.append(item)
+        return out
+
+    def save_settle_batch(self, batch: dict, receipt_rows: list[dict],
+                          result_rows: list[dict], alloc_rows: list[dict]) -> tuple[int, str]:
+        """整批落库并翻转当前指针：同一事务内先删后插。
+
+        同一 batch_id 重跑保留原版本号与首次生成时间；中断时整体回滚，
+        旧版本与当前指针不受影响。
+        """
+        totals_json = json.dumps(
+            {"totals": batch.get("totals", {}), "counts": batch.get("counts", {})},
+            ensure_ascii=False, sort_keys=True,
+        )
+        with self._conn() as conn:
+            batch_id = batch["batch_id"]
+            for table in ("settle_receipt_rows", "settle_result_rows", "settle_alloc_rows"):
+                conn.execute(f"DELETE FROM {table} WHERE batch_id = ?", (batch_id,))
+            conn.executemany(
+                """INSERT INTO settle_receipt_rows (batch_id, receipt_no, counterparty,
+                    received_at, amount, applied, unapplied, status)
+                VALUES (?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        batch_id, r["receipt_no"], r["counterparty"], r["received_at"],
+                        str(r["amount"]), str(r["applied"]), str(r["unapplied"]), r["status"],
+                    )
+                    for r in receipt_rows
+                ],
+            )
+            conn.executemany(
+                """INSERT INTO settle_result_rows (batch_id, voucher_no, counterparty, kind,
+                    due_date, disputed, original, settled, remaining, status,
+                    exclude_reason, memo) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        batch_id, r["voucher_no"], r["counterparty"], r["kind"],
+                        r["due_date"], int(bool(r["disputed"])), str(r["original"]),
+                        str(r["settled"]), str(r["remaining"]), r["status"],
+                        r["exclude_reason"], r["memo"],
+                    )
+                    for r in result_rows
+                ],
+            )
+            conn.executemany(
+                """INSERT INTO settle_alloc_rows (batch_id, receipt_no, line_seq,
+                    counterparty, source_kind, source_no, target_no, amount)
+                VALUES (?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        batch_id, a["receipt_no"], a["line_seq"], a["counterparty"],
+                        a["source_kind"], a["source_no"], a["target_no"], str(a["amount"]),
+                    )
+                    for a in alloc_rows
+                ],
+            )
+            existing = conn.execute(
+                "SELECT version, created_at FROM settle_batches WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchone()
+            if existing:
+                version, created_at = existing["version"], existing["created_at"]
+                conn.execute(
+                    """UPDATE settle_batches SET totals_json = ?, status = 'ready',
+                        vouchers_sha = ?, receipts_sha = ? WHERE batch_id = ?""",
+                    (totals_json, batch.get("vouchers_sha", ""),
+                     batch.get("receipts_sha", ""), batch_id),
+                )
+            else:
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(version), 0) + 1 AS v FROM settle_batches"
+                ).fetchone()
+                version = row["v"]
+                created_at = batch["created_at"]
+                conn.execute(
+                    """INSERT INTO settle_batches (batch_id, version, created_at,
+                        rule_version, vouchers_sha, receipts_sha, totals_json, status)
+                    VALUES (?,?,?,?,?,?,?,'ready')""",
+                    (
+                        batch_id, version, created_at, batch.get("rule_version", ""),
+                        batch.get("vouchers_sha", ""), batch.get("receipts_sha", ""),
+                        totals_json,
+                    ),
+                )
+            conn.execute(
+                """INSERT OR REPLACE INTO settle_state (id, current_batch_id, updated_at)
+                VALUES (1, ?, ?)""",
+                (batch_id, batch.get("switched_at", created_at)),
+            )
+        return version, created_at
+
+    @staticmethod
+    def _settle_batch_row(row: sqlite3.Row | None) -> dict | None:
+        if row is None:
+            return None
+        data = dict(row)
+        stored = json.loads(data.pop("totals_json") or "{}")
+        data["totals"] = stored.get("totals", {})
+        data["counts"] = stored.get("counts", {})
+        return data
+
+    def current_settle_batch(self) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT b.* FROM settle_batches b
+                JOIN settle_state s ON s.current_batch_id = b.batch_id
+                WHERE s.id = 1"""
+            ).fetchone()
+        return self._settle_batch_row(row)
+
+    def get_settle_batch(self, batch_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM settle_batches WHERE batch_id = ?", (batch_id,)
+            ).fetchone()
+        return self._settle_batch_row(row)
+
+    def list_settle_batches(self) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM settle_batches ORDER BY version DESC"
+            ).fetchall()
+            current = conn.execute(
+                "SELECT current_batch_id FROM settle_state WHERE id = 1"
+            ).fetchone()
+        current_id = current["current_batch_id"] if current else ""
+        out = []
+        for row in rows:
+            item = self._settle_batch_row(row)
+            item["current"] = item["batch_id"] == current_id
+            out.append(item)
+        return out
+
+    def settle_receipt_rows(self, batch_id: str) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM settle_receipt_rows WHERE batch_id = ?
+                ORDER BY received_at, receipt_no""",
+                (batch_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def settle_result_rows(self, batch_id: str) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM settle_result_rows WHERE batch_id = ?
+                ORDER BY counterparty, kind, due_date, voucher_no""",
+                (batch_id,),
+            ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["disputed"] = bool(item["disputed"])
+            out.append(item)
+        return out
+
+    def settle_alloc_rows(self, batch_id: str) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM settle_alloc_rows WHERE batch_id = ?
+                ORDER BY receipt_no, line_seq""",
+                (batch_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_current_settle(self, batch_id: str, switched_at: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO settle_state (id, current_batch_id, updated_at)
+                VALUES (1, ?, ?)""",
+                (batch_id, switched_at),
             )

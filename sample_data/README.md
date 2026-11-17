@@ -4,3 +4,5 @@
 - `ledger_book_dirty.csv`：GB18030 编码、中文列名、日期与时间混用、重复凭证号冲突。
 - `bank_truncated_tail.csv`：末行没有换行且列数不足。
 - `empty_bank.csv`、`header_only_ledger.csv`、`all_blank_bank.csv`：三种空态。
+- `settle_vouchers.csv`：往来未清凭证，含应收货款、应付退款、争议退款与未到期凭证。
+- `settle_receipts.csv`：净额到账清单，两笔到账对应两个往来单位。

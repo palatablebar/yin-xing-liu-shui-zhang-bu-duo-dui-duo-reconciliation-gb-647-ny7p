@@ -1,8 +1,8 @@
 # 深度登记 ledgerbank
 
-- 规模：中型（7 个功能模块 / 7 个页面 / 75 条测试）
-- 核心规则：方向相同、金额差 ≤ 0.02 元、日期差 ≤ 3 天的候选；一对一、一对多、多对一按层级与金额差确定性择一；多对一用最多 4 条的受限子集和；手续费单独计入银行侧并按最大余额法分摊。
-- 使用者与工作流：连锁零售财务共享组会计每月把 12 个账户的银行流水与账簿凭证放在一起核对；一笔付款拆多张凭证、多笔流水合并付一张发票，原先逐条手工比对，现在一次运行得到匹配组、未匹配清单、隔离证据与两侧守恒。
+- 规模：中型（8 个功能模块 / 8 个页面 / 102 条测试）
+- 核心规则：方向相同、金额差 ≤ 0.02 元、日期差 ≤ 3 天的候选；一对一、一对多、多对一按层级与金额差确定性择一；多对一用最多 4 条的受限子集和；手续费单独计入银行侧并按最大余额法分摊。净额结算按「争议与未到期不抵、互欠先抵、现金补差、余款挂账」执行，批次幂等且版本可恢复。
+- 使用者与工作流：连锁零售财务共享组会计每月把 12 个账户的银行流水与账簿凭证放在一起核对；一笔付款拆多张凭证、多笔流水合并付一张发票，原先逐条手工比对，现在一次运行得到匹配组、未匹配清单、隔离证据与两侧守恒。同一往来单位留有应收货款与应付退款时，财务把净额到账一次核销，审计要求争议退款与未到期款项不得混入，结算结果保留每凭证的抵减关系与剩余金额。
 
 ## 功能模块
 
@@ -15,6 +15,7 @@
 | M5 多对多求解 | 求解不重叠匹配组，看手续费分摊 | POST /api/matches、页面 /matches | `app/modules/m5_matching/subset.py` `app/modules/m5_matching/fees.py` `app/modules/m5_matching/solve.py` | `tests/test_m5_matching.py` |
 | M6 差异与批次 | 看两侧守恒、差异归因与历史批次 | GET /api/differences、GET /api/batches、页面 /batches | `app/modules/m6_diff/differences.py` `app/modules/m6_diff/history.py` | `tests/test_m6_differences.py` |
 | M7 报告导出 | 导出报告 CSV 与运行清单 JSON | GET /api/export/report.csv、页面 /export | `app/modules/m7_export/csv_out.py` `app/modules/m7_export/manifest_out.py` | `tests/test_m7_export.py` |
+| M8 净额结算 | 导入往来凭证与到账清单，执行净额结算，恢复历史版本 | POST /api/settlements/apply、POST /api/settlements/restore/{batch_id}、页面 /settlements | `app/modules/m8_settlement/settle.py` `app/modules/m8_settlement/service.py` `app/modules/m8_settlement/parse.py` | `tests/test_m8_settlement.py` |
 
 端到端：`tests/test_e2e.py`（样例 → 采信 → 质量 → 候选 → 匹配 → 差异 → 导出，含 6 个页面 200、幂等重跑与失败输入恢复）；不变量：`tests/test_invariants.py`。
 
@@ -33,6 +34,10 @@
 | TRAP-19 | 同一对流水同时命中一对一与子集候选 | 结果取决于候选生成顺序 | 层级优先 + 金额差 + 日期差 + 业务号排序，输入顺序变化不影响结果 | `app/modules/m5_matching/subset.py` | `tests/test_m5_matching.py::test_result_independent_of_candidate_order` |
 | TRAP-23 | 日期差正好 3 天与 4 天；23:59:59 与次日 00:00 | 端点重复计入或跨日归错桶 | 本地日桶左闭右开 `[日初, 次日初)`；窗口按自然日差 ≤3 | `app/modules/m4_candidates/window.py` | `tests/test_m4_candidates.py::test_window_boundary_three_days_included` |
 | TRAP-24 | 手续费按比例分摊后合计差一分 | 各自四舍五入，分摊合计不等于实际合计 | 最大余额法分到 0.01 元，按组号确定性分配尾差 | `app/modules/m5_matching/fees.py` | `tests/test_m5_matching.py::test_fee_allocation_sums_to_actual` |
+| TRAP-25 | 同一到账重试（网络重发、双击） | 重复冲销，应收被抵两遍 | 批次号 = 规则版本 + 两侧输入指纹，重试命中同一批次，事务内先删后插 | `app/modules/m8_settlement/service.py`、`app/store.py` | `tests/test_m8_settlement.py::test_retry_same_receipt_no_duplicate` |
+| TRAP-26 | 结算写到一半进程中断 | 半写批次被当成结果 | 抵减明细、凭证余额、版本指针同一事务提交；中断整体回滚，旧版本保持当前，可显式恢复 | `app/store.py`、`app/modules/m8_settlement/service.py` | `tests/test_m8_settlement.py::test_interrupted_apply_keeps_current`、`test_restore_old_version` |
+| TRAP-27 | 页面与下载稿各算各的 | 两次计算参数漂移，复核对不上 | 页面与 CSV 都只读当前批次的落库行，批次号写进两处 | `app/modules/m8_settlement/service.py`、`app/modules/m8_settlement/csv_out.py` | `tests/test_m8_settlement.py::test_page_and_csv_same_batch` |
+| TRAP-28 | 净额到账把争议退款、未到期款项一起冲掉 | 审计无法追索，争议款被误抵 | 合格性过滤先行，排除项带原因码进清单，金额留在剩余里 | `app/modules/m8_settlement/settle.py` | `tests/test_m8_settlement.py::test_disputed_and_not_due_excluded` |
 
 ## 对账规则
 
@@ -43,10 +48,19 @@
 - 匹配差额 = 银行匹配金额 − 账簿匹配金额，容差 0.02 元内允许非 0，并在差异清单与页面显式列出。
 - 以上五账在 `/api/differences`、页面 `/batches` 与报告 CSV 中同时展示。
 
+## 净额结算规则
+
+- 合格性：争议凭证、到期日晚于到账日的款项不参与冲销，排除清单带 `SETTLE_DISPUTED` / `SETTLE_NOT_DUE` 原因码。
+- 抵减顺序：到账按（到账日, 到账号）升序处理；每笔到账对其往来单位，合格应收按（到期日, 凭证号）升序受偿，先用合格应付退款互抵（同序），再用到账现金补差。
+- 余款挂账：现金抵不完的挂「待核销」，应收抵不完的保留剩余金额继续追索；同一往来单位多笔到账在同一批内结转凭证余额。
+- 守恒：到账合计 = 已抵现金 + 待核销现金；合格应收 = 应收已抵 + 应收剩余；合格退款 = 退款已抵 + 退款剩余；应收已抵 = 退款已抵 + 已抵现金；凭证笔数 = 已结清 + 部分结算 + 未结算 + 已排除。
+- 幂等与恢复：批次号 = 规则版本 + 凭证指纹 + 到账指纹，同一输入重试命中同一批次；每次执行生成新版本并原子翻转当前指针；页面 `/settlements` 与 `export.csv` 同读当前批次。
+
 ## 反例与不变量
 
 - 反例（朴素实现会挂）：`tests/test_m5_matching.py::test_bank_signed_total_matches_decimal_sum`（float 累加对不上分）、`tests/test_m1_ingest.py::test_truncated_tail_rejected`（`readlines()` 会把半行当数据）、`tests/test_m3_quality.py::test_duplicate_txn_keeps_earliest`（后写覆盖会得到 999.00）、`tests/test_m5_matching.py::test_many_to_one_subset_bounded_to_four`（5 笔合并会被错误凑成一笔）、`tests/test_m4_candidates.py::test_window_four_days_excluded`（宽窗口会多配一对）。
 - 不变量：`tests/test_invariants.py::test_bank_conservation`（守恒）、`tests/test_invariants.py::test_disjoint_assignment`（一组不占两行）、`tests/test_invariants.py::test_fee_conservation`（分摊守恒）、`tests/test_invariants.py::test_rerun_row_counts_stable`（幂等）、`tests/test_invariants.py::test_quarantine_excluded_from_totals`（隔离不计入合计）。
+- 结算不变量：`tests/test_m8_settlement.py::test_demo_settlement_totals_and_identities`（五项守恒）、`test_retry_same_receipt_no_duplicate`（重试不重复冲销）、`test_interrupted_apply_keeps_current`（中断保旧版）、`test_page_and_csv_same_batch`（页面与下载同批）、`test_settle_result_order_independent`（输入顺序无关）。
 - 端到端：`tests/test_e2e.py::test_full_pipeline_from_samples`。
 
 ## 已知不覆盖
@@ -55,3 +69,4 @@
 - 多币种不折算；外币金额若带币种代码以外字符会进隔离区，样例只覆盖人民币。
 - 手续费只按组内银行金额比例分摊，不区分银行收费与第三方收费。
 - 跨月批次不合并，一次运行对应一份月度流水。
+- 净额结算的待核销现金不自动结转下期，留在当前批次待人工处理；结算输入整侧替换，到账清单需包含本期全部到账。

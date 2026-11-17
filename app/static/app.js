@@ -28,7 +28,7 @@ function setBusy(value) {
   });
 }
 
-async function runAction(name) {
+async function runAction(name, button) {
   if (state.busy) return;
   if (name === "quarantine") {
     window.location.href = "/quarantine";
@@ -38,8 +38,13 @@ async function runAction(name) {
     demo: "/api/demo/run",
     candidates: "/api/candidates",
     matches: "/api/matches",
+    demo_settle: "/api/settlements/demo",
+    apply_settle: "/api/settlements/apply",
   };
-  const url = urls[name];
+  let url = urls[name];
+  if (name === "restore" && button && button.dataset.batch) {
+    url = `/api/settlements/restore/${encodeURIComponent(button.dataset.batch)}`;
+  }
   if (!url) return;
   setBusy(true);
   try {
@@ -55,7 +60,7 @@ async function runAction(name) {
 document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("click", (event) => {
     const button = event.target.closest("[data-action]");
-    if (button) runAction(button.dataset.action);
+    if (button) runAction(button.dataset.action, button);
   });
 
   const form = document.querySelector("#import-form");
@@ -70,6 +75,25 @@ document.addEventListener("DOMContentLoaded", () => {
       const data = new FormData(form);
       try {
         await post("/api/statements/import", data);
+        window.location.reload();
+      } catch (error) {
+        flash(error.message);
+      }
+    });
+  }
+
+  const settleForm = document.querySelector("#settle-import-form");
+  if (settleForm) {
+    settleForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const fileInput = settleForm.querySelector('input[type="file"]');
+      if (!fileInput || !fileInput.files.length) {
+        flash("请选择文件");
+        return;
+      }
+      const data = new FormData(settleForm);
+      try {
+        await post("/api/settlements/import", data);
         window.location.reload();
       } catch (error) {
         flash(error.message);
